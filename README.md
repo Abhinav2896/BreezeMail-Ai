@@ -50,26 +50,26 @@ BreezeMail AI follows a modern **Serverless API + Client SPA** architecture patt
 ```mermaid
 graph TD
     subgraph Frontend ["Client (React SPA)"]
-        UI[User Interface]
-        State[Local Component State]
+        UI["User Interface"]
+        State["Local Component State"]
         UI -->|User Input| State
-        State -->|fetch()| API_Call
+        State -->|fetch API| API_Call
     end
 
     subgraph Backend ["Server (Next.js API Route)"]
-        API_Call[POST /api/generate]
-        API_Call -->|Validate Input| Validation[Validation Layer]
-        Validation -->|Build Prompt| Engine[Prompt Engineering]
-        Engine -->|Request| Proxy[Secure Proxy]
+        API_Call["POST /api/generate"]
+        API_Call -->|Validate Input| Validation["Validation Layer"]
+        Validation -->|Build Prompt| Engine["Prompt Engineering"]
+        Engine -->|Request| Proxy["Secure Proxy"]
     end
 
     subgraph External ["External Service"]
-        LLM[Google Gemini API]
+        LLM["Google Gemini API"]
     end
 
     Proxy -- "Auth: GEMINI_API_KEY" --> LLM
     LLM -->|Raw Output| Proxy
-    Proxy -->|Clean Fences & Parse| Parser[JSON Parser & Validator]
+    Proxy -->|Clean Fences and Parse| Parser["JSON Parser and Validator"]
     Parser -->|Structured JSON| API_Call
     API_Call -->|EmailContent| State
     State -->|Re-render| UI
