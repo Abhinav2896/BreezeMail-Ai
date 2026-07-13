@@ -9,7 +9,7 @@ BreezeMail AI (formerly PrimeMail AI) is a powerful tool that allows you to effo
 ## ✨ Features
 
 - **AI-Powered Generation:** Leverages Google's `gemini-flash-latest` model for lightning-fast, high-quality email drafts.
-- **Context-Aware (RAG):** Grounds emails in curated writing best-practices using a zero-dependency, local TF-IDF vectorizer.
+- **Context-Aware (RAG):** Grounds emails in curated writing best-practices using LangChain and Google's `gemini-embedding-001` dense semantic vectors.
 - **Customizable Output:** Tailor the tone (Professional, Casual, Friendly), language (English, Hinglish), and length of your emails.
 - **Glassmorphism UI:** A stunning, modern translucent UI with subtle micro-interactions and dark mode support.
 - **Responsive Design:** A beautiful 3-column desktop layout that elegantly stacks into a single-column view on mobile and tablet devices.
@@ -59,13 +59,13 @@ graph TD
 
     subgraph Backend ["Server (Next.js API Route)"]
         API_Call["POST /api/generate"]
-        API_Call -->|Local TF-IDF| Retrieval["RAG Retrieval"]
+        API_Call -->|LangChain/Gemini Embedding| Retrieval["RAG Retrieval"]
         Retrieval -->|Context Chunks| Validation["Validation Layer"]
         Validation -->|Build Prompt| Engine["Prompt Engineering"]
         Engine -->|Request| Proxy["Secure Proxy"]
         
-        IndexDB[("rag-index.json\n(TF-IDF Index)")]
-        IndexDB -.->|Search| Retrieval
+        IndexDB[("rag-index.json\n(Dense Embeddings)")]
+        IndexDB -.->|Local Cosine Search| Retrieval
     end
 
     subgraph External ["External Service"]
@@ -242,7 +242,7 @@ The core endpoint generating email drafts proxying to Gemini LLM.
    ```env
    RAG_ENABLED=true
    RAG_K=3
-   RAG_MIN_SCORE=0.10
+   RAG_MIN_SCORE=0.50
    RAG_MAX_CONTEXT_CHARS=2400
    ```
 

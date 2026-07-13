@@ -47,10 +47,6 @@ export interface RagIndex {
   dim: number;
   /** All embedded chunks */
   chunks: RagChunk[];
-  /** TF-IDF vocabulary: [term, index] pairs (for local embedder) */
-  vocab?: [string, number][];
-  /** TF-IDF IDF values: [term, idf] pairs (for local embedder) */
-  idf?: [string, number][];
 }
 
 /**

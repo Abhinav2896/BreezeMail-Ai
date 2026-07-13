@@ -1,25 +1,13 @@
 // ---------------------------------------------------------------------------
-// scripts/build-index.ts — Build-time RAG index generator
-// ---------------------------------------------------------------------------
-//
-// Reads all Markdown files from `knowledge/`, chunks them using the
-// markdown-aware splitter, embeds locally via TF-IDF, and writes
-// the index + manifest to `public/`.
-//
-// Usage:
-//   npx tsx scripts/build-index.ts
-//   npx tsx scripts/build-index.ts --dry-run
-//   npx tsx scripts/build-index.ts --corpus=knowledge --out=public
-//
-// Wired to `prebuild` in package.json → runs automatically on `npm run build`.
+// scripts/build-index.ts — Build-time RAG index generator (LangChain)
 // ---------------------------------------------------------------------------
 
 import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { createHash } from "node:crypto";
-import { chunkMarkdown } from "../lib/rag/splitter";
-import { embedAllLocal, getEmbeddingModel } from "../lib/rag/embedder";
 import type { RagChunk, RagIndex, RagManifest } from "../lib/rag/types";
+import { MarkdownTextSplitter } from "@langchain/textsplitters";
+import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -39,122 +27,98 @@ const outDir = getArg("out", "public");
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log("[build-index] Starting RAG index build...");
+  console.log("[build-index] Starting RAG index build (LangChain)...");
   console.log(`[build-index] Corpus: ${corpusDir}`);
   console.log(`[build-index] Output: ${outDir}`);
   console.log(`[build-index] Dry run: ${isDryRun}`);
 
-  // 1. Read all .md files from the corpus directory
+  if (!process.env.GEMINI_API_KEY) {
+    console.error("[build-index] ERROR: GEMINI_API_KEY environment variable is required.");
+    process.exit(1);
+  }
+
   const corpusPath = join(process.cwd(), corpusDir);
   let files: string[];
   try {
     const entries = await readdir(corpusPath);
     files = entries.filter((f) => f.endsWith(".md"));
   } catch (err) {
-    console.error(
-      `[build-index] ERROR: Cannot read corpus directory "${corpusPath}":`,
-      err instanceof Error ? err.message : err,
-    );
+    console.error(`[build-index] ERROR: Cannot read corpus directory "${corpusPath}":`, err);
     process.exit(1);
   }
 
   if (files.length === 0) {
-    console.error(
-      `[build-index] ERROR: No .md files found in "${corpusPath}". ` +
-        `Refusing to ship a 0-chunk index.`,
-    );
+    console.error("[build-index] ERROR: No .md files found in corpus.");
     process.exit(1);
   }
 
-  console.log(`[build-index] Found ${files.length} corpus files: ${files.join(", ")}`);
-
-  // 2. Read and chunk each file
   const allChunks: Omit<RagChunk, "vector">[] = [];
   const contentHashes: string[] = [];
+
+  const splitter = new MarkdownTextSplitter({
+    chunkSize: 500,
+    chunkOverlap: 80,
+  });
 
   for (const file of files) {
     const filePath = join(corpusPath, file);
     const raw = await readFile(filePath, "utf-8");
-    contentHashes.push(
-      createHash("sha256").update(raw).digest("hex"),
-    );
+    contentHashes.push(createHash("sha256").update(raw).digest("hex"));
 
-    // Extract title from YAML frontmatter
     const title = extractFrontmatterTitle(raw) || basename(file, ".md");
-
-    // Strip frontmatter before chunking
     const content = stripFrontmatter(raw);
 
-    // Chunk
-    const rawChunks = chunkMarkdown(content, { chunkSize: 500, overlap: 80 });
+    const docs = await splitter.createDocuments([content]);
+    console.log(`[build-index]   ${file}: ${docs.length} chunks`);
 
-    console.log(
-      `[build-index]   ${file}: ${rawChunks.length} chunks`,
-    );
-
-    for (let i = 0; i < rawChunks.length; i++) {
+    for (let i = 0; i < docs.length; i++) {
       allChunks.push({
         id: `${basename(file, ".md")}#${i}`,
         source: file,
         title,
-        heading: rawChunks[i].heading,
-        text: rawChunks[i].text,
+        heading: "", // LangChain's basic markdown splitter doesn't capture heading automatically
+        text: docs[i].pageContent,
       });
     }
   }
 
-  console.log(
-    `[build-index] Total chunks: ${allChunks.length}`,
-  );
-
   if (allChunks.length === 0) {
-    console.error(
-      "[build-index] ERROR: Chunking produced 0 chunks. Check corpus content.",
-    );
+    console.error("[build-index] ERROR: Chunking produced 0 chunks.");
     process.exit(1);
   }
 
   if (isDryRun) {
     console.log("[build-index] Dry run — skipping embedding and write.");
-    console.log("[build-index] Chunks preview:");
-    for (const chunk of allChunks.slice(0, 5)) {
-      console.log(
-        `  [${chunk.id}] "${chunk.heading}" (${chunk.text.length} chars)`,
-      );
-    }
     return;
   }
 
-  // 3. Embed all chunks locally (TF-IDF — no API key required)
-  console.log(
-    `[build-index] Embedding ${allChunks.length} chunks with ${getEmbeddingModel()} (local)...`,
-  );
+  console.log(`[build-index] Embedding ${allChunks.length} chunks with GoogleGenAIEmbeddings...`);
+  
+  const embeddings = new GoogleGenerativeAIEmbeddings({
+    apiKey: process.env.GEMINI_API_KEY,
+    modelName: "gemini-embedding-001", // Default Gemini embedding model
+  });
 
   const texts = allChunks.map((c) => c.text);
-  const { vectors, vocab, idf } = embedAllLocal(texts);
+  const vectors = await embeddings.embedDocuments(texts);
 
   if (vectors.length !== allChunks.length) {
-    console.error(
-      `[build-index] ERROR: Got ${vectors.length} vectors for ${allChunks.length} chunks`,
-    );
+    console.error(`[build-index] ERROR: Got ${vectors.length} vectors for ${allChunks.length} chunks`);
     process.exit(1);
   }
 
   const dim = vectors[0].length;
+  const modelName = "google-genai/gemini-embedding-001";
 
-  // 4. Assemble index (includes vocab + idf for runtime query embedding)
   const index: RagIndex = {
-    model: getEmbeddingModel(),
+    model: modelName,
     dim,
     chunks: allChunks.map((chunk, i) => ({
       ...chunk,
       vector: vectors[i],
     })),
-    vocab,
-    idf,
   };
 
-  // 5. Write index and manifest
   const outputPath = join(process.cwd(), outDir);
   await mkdir(outputPath, { recursive: true });
 
@@ -168,39 +132,24 @@ async function main() {
 
   const manifest: RagManifest = {
     hash: contentHash,
-    model: getEmbeddingModel(),
+    model: modelName,
     dim,
     count: allChunks.length,
     builtAt: new Date().toISOString(),
   };
 
   await writeFile(indexPath, JSON.stringify(index), "utf-8");
-  await writeFile(
-    manifestPath,
-    JSON.stringify(manifest, null, 2),
-    "utf-8",
-  );
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
 
-  const indexSizeKB = (
-    Buffer.byteLength(JSON.stringify(index)) / 1024
-  ).toFixed(1);
-
+  const indexSizeKB = (Buffer.byteLength(JSON.stringify(index)) / 1024).toFixed(1);
   console.log(`[build-index] ✓ Index written to ${indexPath} (${indexSizeKB} KB)`);
-  console.log(`[build-index] ✓ Manifest written to ${manifestPath}`);
-  console.log(
-    `[build-index] ✓ Done: ${allChunks.length} chunks, dim=${dim}, vocab=${vocab.length} terms, model=${getEmbeddingModel()}`,
-  );
+  console.log(`[build-index] ✓ Done.`);
 }
-
-// ---------------------------------------------------------------------------
-// Frontmatter helpers
-// ---------------------------------------------------------------------------
 
 function extractFrontmatterTitle(raw: string): string | null {
   const match = raw.match(/^---\s*\n([\s\S]*?)\n---/);
   if (!match) return null;
-  const frontmatter = match[1];
-  const titleMatch = frontmatter.match(/^title:\s*(.+)$/m);
+  const titleMatch = match[1].match(/^title:\s*(.+)$/m);
   return titleMatch ? titleMatch[1].trim().replace(/^["']|["']$/g, "") : null;
 }
 
@@ -208,11 +157,6 @@ function stripFrontmatter(raw: string): string {
   return raw.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "");
 }
 
-// ---------------------------------------------------------------------------
-// Run
-// ---------------------------------------------------------------------------
-
-// Load .env and .env.local (simple dotenv without a dependency)
 async function loadEnv() {
   const envFiles = [".env", ".env.local"];
   for (const envFile of envFiles) {
@@ -230,9 +174,7 @@ async function loadEnv() {
           process.env[key] = value;
         }
       }
-    } catch {
-      // File doesn't exist — that's fine
-    }
+    } catch {}
   }
 }
 

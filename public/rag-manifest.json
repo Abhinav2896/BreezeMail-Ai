@@ -1,7 +1,7 @@
 {
   "hash": "0fc705171cc79b24",
-  "model": "tfidf-local-v1",
-  "dim": 1023,
-  "count": 116,
-  "builtAt": "2026-07-13T05:30:33.876Z"
+  "model": "google-genai/gemini-embedding-001",
+  "dim": 3072,
+  "count": 82,
+  "builtAt": "2026-07-13T10:08:45.222Z"
 }

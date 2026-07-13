@@ -11,7 +11,7 @@
 The application architecture follows a modern **Serverless API + Client SPA** pattern, fully encapsulated within the Next.js App Router framework.
 - **Client (Frontend)**: A React-based Single Page Application (SPA) providing a highly interactive, glassmorphic UI.
 - **Server (Backend)**: A Next.js API Route serving as a secure proxy to communicate with the Gemini LLM, ensuring API keys are kept secure and responses are validated.
-- **RAG Subsystem (Local)**: A zero-dependency, in-process TF-IDF vectorizer and retriever that grounds LLM generations in a curated knowledge base of writing best practices. (See [RAG.md](file:///c:/Users/Abhinav/Desktop/Projects/BreezeMail%20Ai/RAG.md))
+- **RAG Subsystem (Local + API)**: A LangChain-powered retrieval system utilizing `gemini-embedding-001` that grounds LLM generations in a curated knowledge base of writing best practices. (See [RAG.md](file:///c:/Users/Abhinav/Desktop/Projects/BreezeMail%20Ai/RAG.md))
 - **External AI Service**: Google Gemini API (`gemini-flash-latest`), responsible for natural language generation.
 
 ---
@@ -57,7 +57,7 @@ The frontend is a modular hierarchy of React components with strictly separated 
 2. **Action Trigger:** The user clicks "Generate Email". The `handleGenerate` function in `App.tsx` is called.
 3. **State Update:** `App.tsx` sets `isLoading = true`, clearing any previous errors or email data.
 4. **API Request (Client → Server):** A `fetch` request is made to `POST /api/generate` with the form payload.
-5. **RAG Retrieval (Server):** The Next.js API route embeds the query using a local TF-IDF model, searches the pre-built `rag-index.json`, and retrieves top matching knowledge base chunks.
+5. **RAG Retrieval (Server):** The Next.js API route beds the query via the Gemini API (`gemini-embedding-001`), searches the pre-built `rag-index.json` using local cosine similarity, and retrieves the top matching knowledge base chunks.
 6. **Prompt Engineering (Server):** The server constructs a strict prompt for the Gemini API, requesting a structured JSON response, and injects the retrieved RAG chunks as writing guidelines.
 7. **LLM Inference (Server → Gemini):** The server securely calls the Gemini API using the `GEMINI_API_KEY`.
 8. **Response Parsing (Server):** The server strips any markdown code blocks from the Gemini response, strictly parses it as JSON, validates it against the `EmailContent` interface, attaches RAG source citations, and sends it back to the client.
@@ -85,7 +85,7 @@ BreezeMail Ai/
 ├── lib/rag/                      # RAG implementation (embedder, retriever, splitter)
 ├── public/
 │   ├── Background.png            # Static assets
-│   └── rag-index.json            # Build-time generated TF-IDF index for RAG
+│   └── rag-index.json            # Build-time generated dense embeddings index for RAG
 ├── scripts/
 │   └── build-index.ts            # Build script to generate rag-index.json
 ├── src/

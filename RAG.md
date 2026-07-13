@@ -8,12 +8,12 @@
 
 To ensure the AI generates high-quality, professional emails that adhere to specific writing guidelines, BreezeMail AI employs a RAG subsystem. 
 
-Instead of relying on an external embedding API (which can introduce latency, rate limits, and compatibility issues), the system uses a **100% local, zero-dependency TF-IDF (Term Frequency-Inverse Document Frequency) vectorizer**.
+Instead of relying on a legacy TF-IDF sparse index, the system uses **dense semantic embeddings** powered by **Google's `gemini-embedding-001` model** and the **LangChain** ecosystem.
 
 ### Key Benefits
-- **Zero API Dependency:** Indexing and retrieval run entirely in-process. No API keys are required for embeddings.
-- **Ultra-Fast Retrieval:** Cosine similarity scans over the small knowledge base take <10ms.
-- **Deterministic:** The exact same index is built every time, regardless of API availability.
+- **Deep Semantic Understanding:** Captures the actual meaning and intent behind user briefs, not just keyword overlaps.
+- **Robust Framework:** Built on `@langchain/google-genai` and `@langchain/textsplitters` for industry-standard chunking and embedding.
+- **Serverless-Friendly Retrieval:** The heavy embedding API calls are performed at build-time. At runtime, the index is loaded from a static `rag-index.json` file and queried using a fast, in-memory cosine similarity search.
 
 ---
 
@@ -39,10 +39,9 @@ Because Vercel serverless environments are mostly read-only, the knowledge base 
 
 **Execution:** `npm run prebuild` (automatically runs before `next build`).
 
-1. **Chunking:** Reads all `.md` files in `knowledge/`, strips frontmatter, and splits the content by headings and code blocks using a markdown-aware chunker (`lib/rag/splitter.ts`).
-2. **Vocabulary Construction:** Tokenizes all chunks, removes stop words, and builds a fixed vocabulary of terms. Calculates Inverse Document Frequency (IDF) for each term.
-3. **Local Embedding:** Projects each chunk into a sparse TF-IDF vector of dimensionality equal to the vocabulary size.
-4. **Serialization:** Writes the chunks, vocabulary, IDF map, and vectors to `public/rag-index.json`.
+1. **Chunking:** Reads all `.md` files in `knowledge/` and splits them using LangChain's `MarkdownTextSplitter`.
+2. **Embedding Formulation:** Batches the chunks and calls the Gemini API (`gemini-embedding-001`) via `@langchain/google-genai` to generate 768-dimensional dense vectors for each chunk.
+3. **Serialization:** Writes the chunks, their metadata, and their corresponding dense vectors to `public/rag-index.json`.
 
 ---
 
@@ -52,8 +51,8 @@ When a user requests an email generation via `POST /api/generate`, the RAG syste
 
 1. **Lazy Load & Cache:** `lib/rag/index-cache.ts` reads `public/rag-index.json`. The Promise is memoized so concurrent requests share the same I/O operation.
 2. **Query Formulation:** The system concatenates all user selections into one robust search string. For example: `tone: Professional | language: English | length: Medium | brief: [User's description]`.
-3. **Local Embedding:** The combined query is tokenized and embedded into a TF-IDF vector using the vocabulary and IDF map loaded from the index.
-4. **Cosine Similarity:** The query vector is compared against all chunk vectors in the index. Because the query includes tone and language keywords, chunks relating to those specific templates (e.g., professional tone guidelines) naturally score higher.
+3. **Live Embedding:** The combined query is sent to the Gemini API (`gemini-embedding-001`) to generate a dense semantic vector representing the user's exact need.
+4. **Cosine Similarity:** A fast, local math function scans the query vector against all 80+ pre-calculated vectors in the index to find the highest-scoring contextual matches.
 5. **Filtering & Truncation:** 
    - Chunks below `RAG_MIN_SCORE` are discarded.
    - Results are sorted by similarity descending.
@@ -69,9 +68,8 @@ A common misconception is that the RAG index stores context about specific real-
 **Example:**
 If a user writes the brief `"today my friend is sick i need leave for him"` and selects a `"Professional"` tone:
 - The query becomes: `tone: Professional | language: English | length: Medium | brief: today my friend is sick i need leave for him`.
-- The TF-IDF system does **not** find the word "sick" (because it isn't in the knowledge base).
-- However, it **does** find strong matches for words like `"tone"`, `"Professional"`, and `"English"`.
-- It retrieves chunks from `voice-and-tone.md` (explaining how to sound professional) and `email-anatomy.md` (how to structure a standard email).
+- The semantic embeddings perfectly match the concept of "professionalism" and "structure".
+- It retrieves chunks from `voice-and-tone.md` (explaining how to sound professional) and `email-anatomy.md` (how to structure a standard email) by calculating their mathematical vector proximity.
 - The LLM uses these structural rules to properly format the specific details ("sick leave") provided by the user.
 
 **Immutability:** The RAG system does **not** learn from user inputs. It does not store user briefs (like "sick leave") back into the database for future use. It strictly retrieves pre-defined templates based on the keywords in the query string.
@@ -86,7 +84,7 @@ The RAG system is highly tunable via environment variables in `.env.local`:
 |----------|---------|-------------|
 | `RAG_ENABLED` | `true` | Kill-switch to bypass retrieval entirely. |
 | `RAG_K` | `3` | Maximum number of chunks to retrieve and inject. |
-| `RAG_MIN_SCORE` | `0.10` | Minimum cosine similarity threshold (0.0 to 1.0). TF-IDF scores are naturally lower than dense embeddings. |
+| `RAG_MIN_SCORE` | `0.50` | Minimum cosine similarity threshold (0.0 to 1.0). Dense embeddings typically cluster higher than 0.5. |
 | `RAG_MAX_CONTEXT_CHARS` | `2400` | Hard cap on the total character length of injected context. |
 
 ---

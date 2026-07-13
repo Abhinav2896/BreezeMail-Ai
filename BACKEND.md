@@ -10,7 +10,7 @@ The **BreezeMail AI** backend is currently a lightweight API layer built nativel
 
 ### Core backend responsibilities
 1. **Secure proxying** — holding the `GEMINI_API_KEY` on the server and communicating with Google.
-2. **RAG Retrieval** — embedding the query locally using TF-IDF and retrieving context chunks from the `rag-index.json` knowledge base to ground the generation.
+2. **RAG Retrieval** — generating semantic query embeddings via LangChain/Gemini and retrieving context chunks from the `rag-index.json` knowledge base to ground the generation using local cosine similarity.
 3. **Prompt engineering** — translating the user's UI selections and retrieved RAG context into a structured prompt.
 4. **Validation & parsing** — ensuring the user input is valid, and defensively parsing/cleaning the LLM's raw output into a strict JSON contract for the frontend.
 
@@ -101,7 +101,7 @@ BreezeMail AI separates secrets from application configuration.
 |----------|---------|-------------|
 | `RAG_ENABLED` | `true` | Set to "false" to bypass the RAG retrieval system. |
 | `RAG_K` | `3` | Number of top-K chunks to retrieve from the knowledge base. |
-| `RAG_MIN_SCORE` | `0.10` | Minimum cosine similarity threshold (0-1). TF-IDF scores are naturally lower. |
+| `RAG_MIN_SCORE` | `0.50` | Minimum cosine similarity threshold (0-1). Dense embeddings typically require higher minimums than TF-IDF. |
 | `RAG_MAX_CONTEXT_CHARS` | `2400`| Maximum total character count for all injected context snippets. |
 
 ---

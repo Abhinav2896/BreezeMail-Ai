@@ -1,31 +1,27 @@
 // ---------------------------------------------------------------------------
-// lib/rag/retriever.ts — Cosine-similarity retriever (local TF-IDF)
+// lib/rag/retriever.ts — LangChain Embeddings + Local Cosine Retriever
 // ---------------------------------------------------------------------------
 //
 // Hot-path flow:
 //   1. Load index (cached after first call)
-//   2. Embed the query locally (TF-IDF, no API call, ~1ms)
+//   2. Embed the query via LangChain (GoogleGenerativeAIEmbeddings)
 //   3. Cosine scan across all chunks
 //   4. Filter by minScore, take top-K, cap total context chars
-//
-// All operations are pure CPU — no network calls in the retrieval path.
 // ---------------------------------------------------------------------------
 
 import type { RagConfig, RagHit, RagQuery } from "./types";
-import { embedQuery } from "./embedder";
 import { loadIndex } from "./index-cache";
+import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 
 // ---------------------------------------------------------------------------
 // Defaults (overridable via env)
 // ---------------------------------------------------------------------------
 
 const DEFAULT_K = 3;
-const DEFAULT_MIN_SCORE = 0.1; // TF-IDF cosine scores are typically lower than dense embeddings
+// Dense embeddings typically have higher baseline cosine similarities than TF-IDF.
+const DEFAULT_MIN_SCORE = 0.5;
 const DEFAULT_MAX_CONTEXT_CHARS = 2400;
 
-/**
- * Build RagConfig from environment variables with sensible defaults.
- */
 export function buildRagConfig(): RagConfig {
   return {
     k: parseInt(process.env.RAG_K ?? "", 10) || DEFAULT_K,
@@ -37,16 +33,8 @@ export function buildRagConfig(): RagConfig {
   };
 }
 
-/**
- * Retrieve the top-K relevant chunks for a given query.
- *
- * Graceful degradation:
- * - If the index fails to load → returns []
- * - If embedding fails → returns []
- * - If no chunks pass minScore → returns []
- *
- * Never throws.
- */
+let embeddings: GoogleGenerativeAIEmbeddings | null = null;
+
 export async function retrieve(
   query: RagQuery,
   cfg?: Partial<RagConfig>,
@@ -67,14 +55,21 @@ export async function retrieve(
       return [];
     }
 
-    if (!index.vocab || !index.idf) {
-      console.warn("[rag] Index missing vocab/idf — skipping retrieval");
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn("[rag] GEMINI_API_KEY missing — skipping retrieval");
       return [];
     }
 
-    // 2. Embed query locally (TF-IDF, no API call, ~1ms)
+    if (!embeddings) {
+      embeddings = new GoogleGenerativeAIEmbeddings({
+        apiKey: process.env.GEMINI_API_KEY,
+        modelName: "gemini-embedding-001",
+      });
+    }
+
+    // 2. Embed query locally (via API, but called at runtime)
     const queryString = buildQueryString(query);
-    const qVec = embedQuery(queryString, index.vocab, index.idf);
+    const qVec = await embeddings.embedQuery(queryString);
 
     // 3. Cosine scan
     const scored: Array<RagHit & { _charCount: number }> = [];
@@ -103,7 +98,6 @@ export async function retrieve(
       if (results.length >= config.k) break;
       if (totalChars + hit._charCount > config.maxContextChars) continue;
       totalChars += hit._charCount;
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { _charCount, ...ragHit } = hit;
       results.push(ragHit);
     }
@@ -128,31 +122,20 @@ export async function retrieve(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Build a normalized query string from structured fields.
- * Including tone/language/length helps surface style-relevant chunks.
- */
 function buildQueryString(query: RagQuery): string {
   return `tone: ${query.tone} | language: ${query.language} | length: ${query.length} | brief: ${query.description}`;
 }
 
-/**
- * Compute cosine similarity between two vectors.
- * Assumes vectors may not be pre-normalized.
- */
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) return 0;
-
   let dot = 0;
   let magA = 0;
   let magB = 0;
-
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     magA += a[i] * a[i];
     magB += b[i] * b[i];
   }
-
   const denom = Math.sqrt(magA) * Math.sqrt(magB);
   return denom === 0 ? 0 : dot / denom;
 }
