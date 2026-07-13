@@ -256,3 +256,6 @@ The core endpoint generating email drafts proxying to Gemini LLM.
    Navigate to [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
+## Application Link:-
+
+https://breeze-mail-ai.vercel.app/
