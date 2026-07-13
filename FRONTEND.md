@@ -22,7 +22,7 @@
 | Layer            | Technology                                    | Version  |
 |------------------|-----------------------------------------------|----------|
 | UI framework     | **React**                                     | 18.3.1   |
-| Meta-framework   | **Next.js (App Router)**                      | 15.3.4+  |
+| Meta-framework   | **Next.js (App Router)**                      | 16.2.10 (Turbopack) |
 | Language         | **TypeScript**                                | ESM      |
 | Styling          | **Tailwind CSS** (v4, via `@tailwindcss/postcss`)| 4.1.12   |
 | Primitives       | **Radix UI** (headless) + **lucide-react** icons | 1.x / 0.487 |
@@ -52,7 +52,7 @@ BreezeMail Ai/
     │       ├── BackgroundLayer.tsx   # Fixed full-bleed bg + dark overlay
     │       ├── Navbar.tsx            # Logo pill + 3 action buttons
     │       ├── EmailInputPanel.tsx   # Form: description + tone/lang/length + chips
-    │       ├── GeneratedEmailPanel.tsx  # Renders current email + Copy
+    │       ├── GeneratedEmailPanel.tsx  # Renders current email + sources chips + Copy
     │       ├── HistoryPanel.tsx      # Last 5 history items + "View all"
     │       ├── TipsPanel.tsx         # Mint lightbulb callout
     │       ├── HistoryView.tsx       # Full-screen overlay, sorted list
@@ -99,6 +99,7 @@ interface EmailContent {
   paragraphs: string[];
   bullets: string[];
   signOff: string;
+  sources?: { id: string; title: string }[];
 }
 
 interface HistoryItem {

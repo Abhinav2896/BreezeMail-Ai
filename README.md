@@ -9,6 +9,7 @@ BreezeMail AI (formerly PrimeMail AI) is a powerful tool that allows you to effo
 ## ✨ Features
 
 - **AI-Powered Generation:** Leverages Google's `gemini-flash-latest` model for lightning-fast, high-quality email drafts.
+- **Context-Aware (RAG):** Grounds emails in curated writing best-practices using a zero-dependency, local TF-IDF vectorizer.
 - **Customizable Output:** Tailor the tone (Professional, Casual, Friendly), language (English, Hinglish), and length of your emails.
 - **Glassmorphism UI:** A stunning, modern translucent UI with subtle micro-interactions and dark mode support.
 - **Responsive Design:** A beautiful 3-column desktop layout that elegantly stacks into a single-column view on mobile and tablet devices.
@@ -23,7 +24,7 @@ BreezeMail AI is built using the latest web technologies, ensuring high performa
 | Layer            | Technology                                    | Version  |
 |------------------|-----------------------------------------------|----------|
 | UI framework     | **React**                                     | 18.3.1   |
-| Meta-framework   | **Next.js (App Router)**                      | 15.3.4+  |
+| Meta-framework   | **Next.js (App Router)**                      | 16.2.10 (Turbopack) |
 | Language         | **TypeScript**                                | ESM      |
 | Styling          | **Tailwind CSS** (v4, via `@tailwindcss/postcss`)| 4.1.12   |
 | Primitives       | **Radix UI** (headless) + **lucide-react** icons | 1.x / 0.487 |
@@ -58,9 +59,13 @@ graph TD
 
     subgraph Backend ["Server (Next.js API Route)"]
         API_Call["POST /api/generate"]
-        API_Call -->|Validate Input| Validation["Validation Layer"]
+        API_Call -->|Local TF-IDF| Retrieval["RAG Retrieval"]
+        Retrieval -->|Context Chunks| Validation["Validation Layer"]
         Validation -->|Build Prompt| Engine["Prompt Engineering"]
         Engine -->|Request| Proxy["Secure Proxy"]
+        
+        IndexDB[("rag-index.json\n(TF-IDF Index)")]
+        IndexDB -.->|Search| Retrieval
     end
 
     subgraph External ["External Service"]
@@ -70,7 +75,7 @@ graph TD
     Proxy -- "Auth: GEMINI_API_KEY" --> LLM
     LLM -->|Raw Output| Proxy
     Proxy -->|Clean Fences and Parse| Parser["JSON Parser and Validator"]
-    Parser -->|Structured JSON| API_Call
+    Parser -->|Structured JSON + Sources| API_Call
     API_Call -->|EmailContent| State
     State -->|Re-render| UI
 ```
@@ -181,7 +186,13 @@ The core endpoint generating email drafts proxying to Gemini LLM.
     "greeting": "Hi [Name],",
     "paragraphs": ["First paragraph...", "Second paragraph..."],
     "bullets": ["Point 1", "Point 2"],
-    "signOff": "Best, AI"
+    "signOff": "Best, AI",
+    "sources": [
+      {
+        "id": "email-anatomy#0",
+        "title": "Email Anatomy Guidelines"
+      }
+    ]
   }
 }
 ```
@@ -199,7 +210,7 @@ The core endpoint generating email drafts proxying to Gemini LLM.
 - **Next.js Server Components vs Client Components:** Because the app is heavily stateful, almost all components in `src/app` must carry the `"use client";` directive at the top of the file to preserve interactivity (hooks and event handlers).
 - **Flexbox Heights:** On desktop, achieving internal scroll inside the glass panels requires an unbroken chain of `min-h-0` and `flex-1`/`h-full` attributes extending all the way from the `xl:h-screen` root down to the scrollable container. Without it, flex children will expand to fit their content and ruin the layout.
 - **LLM JSON Formatting:** Gemini sometimes ignores the instruction to omit markdown fences. A custom `stripCodeFences()` function is essential to ensure `JSON.parse` doesn't throw.
-- **Timeouts:** The Gemini API can occasionally hang. The Next.js API route implements an `AbortController` with a 15-second timeout (`TIMEOUT_MS`) to prevent the frontend loading state from spinning indefinitely.
+- **Timeouts:** The Gemini API can occasionally hang. The Next.js API route implements an `AbortController` with a 2-minute timeout (`TIMEOUT_MS = 120_000`) to prevent the frontend loading state from spinning indefinitely.
 
 ---
 
@@ -223,14 +234,22 @@ The core endpoint generating email drafts proxying to Gemini LLM.
    ```
 
 3. **Set up environment variables:**
-   Create a `.env.local` file in the root directory and add your Gemini API key:
+   Create a `.env` file in the root directory for your secrets:
    ```env
    GEMINI_API_KEY=your_gemini_api_key_here
    ```
+   (Optional) The RAG configuration is controlled via `.env.local`:
+   ```env
+   RAG_ENABLED=true
+   RAG_K=3
+   RAG_MIN_SCORE=0.10
+   RAG_MAX_CONTEXT_CHARS=2400
+   ```
 
-4. **Run the development server:**
+4. **Build the RAG Index & run the dev server:**
    ```bash
-   npm run dev
+   npm run build  # Builds the RAG index and Next.js app
+   npm run dev    # Starts the dev server
    ```
 
 5. **Open the application:**

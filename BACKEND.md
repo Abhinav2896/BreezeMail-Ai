@@ -10,8 +10,9 @@ The **BreezeMail AI** backend is currently a lightweight API layer built nativel
 
 ### Core backend responsibilities
 1. **Secure proxying** — holding the `GEMINI_API_KEY` on the server and communicating with Google.
-2. **Prompt engineering** — translating the user's UI selections (tone, language, length) into a structured prompt.
-3. **Validation & parsing** — ensuring the user input is valid, and defensively parsing/cleaning the LLM's raw output into a strict JSON contract for the frontend.
+2. **RAG Retrieval** — embedding the query locally using TF-IDF and retrieving context chunks from the `rag-index.json` knowledge base to ground the generation.
+3. **Prompt engineering** — translating the user's UI selections and retrieved RAG context into a structured prompt.
+4. **Validation & parsing** — ensuring the user input is valid, and defensively parsing/cleaning the LLM's raw output into a strict JSON contract for the frontend.
 
 ---
 
@@ -19,7 +20,7 @@ The **BreezeMail AI** backend is currently a lightweight API layer built nativel
 
 | Layer            | Technology                                    | Version  |
 |------------------|-----------------------------------------------|----------|
-| Framework        | **Next.js (App Router)**                      | 15.3.4+  |
+| Framework        | **Next.js (App Router)**                      | 16.2.10 (Turbopack) |
 | Language         | **TypeScript**                                | ESM      |
 | Core AI API      | **Google Gemini API** (`gemini-flash-latest`)| v1beta   |
 | Runtime          | **Node.js**                                   | Standard |
@@ -51,7 +52,13 @@ This is the primary endpoint that generates an email draft.
     "greeting": "string — the opening greeting",
     "paragraphs": ["string array — each element is one paragraph"],
     "bullets": ["string array — optional bullet points, [] if none"],
-    "signOff": "string — the closing sign-off"
+    "signOff": "string — the closing sign-off",
+    "sources": [
+      {
+        "id": "string — unique identifier for the RAG source",
+        "title": "string — human-readable title of the source"
+      }
+    ]
   }
 }
 ```
@@ -66,7 +73,7 @@ This is the primary endpoint that generates an email draft.
 | `502`  | Gemini returned a non-200 | "AI model returned an error: 429 Too Many Requests" |
 | `502`  | Gemini returned malformed JSON | "AI model response was not valid JSON. Please try again." |
 | `502`  | Response failed structural validation | "AI model response failed validation: Missing or invalid 'subject' field. Please try again." |
-| `504`  | Gemini API took > 15 seconds | "The AI model took too long to respond. Please try again." |
+| `504`  | Gemini API took > 2 minutes | "The AI model took too long to respond. Please try again." |
 
 ### 3.2 History Persistence (BE-HIST-001) — *Future Wiring Point*
 
@@ -82,9 +89,20 @@ Currently, generation history is stored in local component state (`useState` in 
 
 ## 4. Environment Variables
 
+BreezeMail AI separates secrets from application configuration.
+
+**Secrets (`.env` — gitignored)**
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `GEMINI_API_KEY` | **Yes** | API key for Google Gemini. Acquired from Google AI Studio. Used exclusively server-side. |
+
+**Configuration (`.env.local` — committed or gitignored depending on team preference)**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAG_ENABLED` | `true` | Set to "false" to bypass the RAG retrieval system. |
+| `RAG_K` | `3` | Number of top-K chunks to retrieve from the knowledge base. |
+| `RAG_MIN_SCORE` | `0.10` | Minimum cosine similarity threshold (0-1). TF-IDF scores are naturally lower. |
+| `RAG_MAX_CONTEXT_CHARS` | `2400`| Maximum total character count for all injected context snippets. |
 
 ---
 
@@ -128,7 +146,7 @@ To make the codebase easily greppable, UI and backend hooks share a common taxon
 
 - **API Key Configuration:** The server will gracefully fail with a 500 status if `GEMINI_API_KEY` is missing. This takes priority and should happen after basic request parsing but *before* building prompts. 
 - **LLM JSON Formatting:** Gemini sometimes ignores the instruction to omit markdown fences. A custom `stripCodeFences()` function is essential to ensure `JSON.parse` doesn't throw.
-- **Timeouts:** The Gemini API can occasionally hang. The Next.js API route implements an `AbortController` with a 15-second timeout (`TIMEOUT_MS`) to prevent the frontend loading state from spinning indefinitely.
+- **Timeouts:** The Gemini API can occasionally hang. The Next.js API route implements an `AbortController` with a 2-minute timeout (`TIMEOUT_MS = 120_000`) to prevent the frontend loading state from spinning indefinitely.
 - **Client-Side Cancellation:** When a user quickly changes the brief and clicks "Generate" again, the frontend aborts the previous in-flight `fetch` request using a ref-stored `AbortController`. The UI silently drops `AbortError` exceptions to avoid flashing errors to the user.
 
 ---

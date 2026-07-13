@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { retrieve, buildRagConfig } from "../../../lib/rag/retriever";
+import { buildContextBlock, toSourceRef } from "../../../lib/rag/prompt";
+import type { RagQuery } from "../../../lib/rag/types";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,6 +23,8 @@ interface EmailContent {
   paragraphs: string[];
   bullets: string[];
   signOff: string;
+  /** RAG source references — present when RAG retrieval found relevant chunks */
+  sources?: { id: string; title: string }[];
 }
 
 interface GenerateRequest {
@@ -125,13 +130,27 @@ function validateEmailContent(obj: unknown): EmailContent {
 }
 
 // ---------------------------------------------------------------------------
+// RAG helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if RAG is enabled via the RAG_ENABLED environment variable.
+ * Defaults to true — set RAG_ENABLED=false to disable.
+ */
+function isRagEnabled(): boolean {
+  const val = process.env.RAG_ENABLED;
+  if (val === undefined || val === "") return true;
+  return val.toLowerCase() !== "false";
+}
+
+// ---------------------------------------------------------------------------
 // Route Handler — POST /api/generate
 // ---------------------------------------------------------------------------
 
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
 
-const TIMEOUT_MS = 15_000;
+const TIMEOUT_MS = 120_000;
 
 export async function POST(request: NextRequest) {
   // 1. Parse and validate request body (check user input before server config)
@@ -161,16 +180,44 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. Build the prompt
-  const prompt = buildPrompt({
+  // 3. RAG retrieval (graceful: failures degrade to no-context)
+  const ragStartTime = Date.now();
+  let ragHits: Awaited<ReturnType<typeof retrieve>> = [];
+
+  const normalizedReq = {
     description: body.description.trim(),
     tone: body.tone || "Professional",
     language: body.language || "English",
     length: body.length || "Medium",
     recipientName: body.recipientName,
-  });
+  };
 
-  // 4. Call Gemini with timeout
+  if (isRagEnabled()) {
+    try {
+      const ragQuery: RagQuery = {
+        description: normalizedReq.description,
+        tone: normalizedReq.tone,
+        language: normalizedReq.language,
+        length: normalizedReq.length,
+      };
+      ragHits = await retrieve(ragQuery, buildRagConfig());
+    } catch (err) {
+      console.warn(
+        "[rag] Retrieval failed, proceeding without context:",
+        err instanceof Error ? err.message : err,
+      );
+      ragHits = [];
+    }
+  }
+
+  const ragLatencyMs = Date.now() - ragStartTime;
+
+  // 4. Build the prompt (with or without RAG context)
+  const basePrompt = buildPrompt(normalizedReq);
+  const contextBlock = buildContextBlock(ragHits);
+  const prompt = basePrompt + contextBlock;
+
+  // 5. Call Gemini with timeout
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -205,7 +252,7 @@ export async function POST(request: NextRequest) {
     clearTimeout(timeoutId);
   }
 
-  // 5. Handle non-OK Gemini responses
+  // 6. Handle non-OK Gemini responses
   if (!geminiResponse.ok) {
     const statusText = geminiResponse.statusText || "Unknown error";
     return NextResponse.json(
@@ -214,7 +261,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 6. Parse Gemini response
+  // 7. Parse Gemini response
   let geminiBody: unknown;
   try {
     geminiBody = await geminiResponse.json();
@@ -246,7 +293,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 7. Parse and validate the JSON email content
+  // 8. Parse and validate the JSON email content
   const cleaned = stripCodeFences(rawText);
   let parsed: unknown;
   try {
@@ -269,6 +316,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 8. Success
-  return NextResponse.json({ email });
+  // 9. Attach RAG source references to the email
+  const sources = ragHits.map(toSourceRef);
+  if (sources.length > 0) {
+    email.sources = sources;
+  }
+
+  // 10. Build response with RAG stats header
+  const responseBody = { email };
+  const response = NextResponse.json(responseBody);
+
+  // Add RAG observability header
+  response.headers.set(
+    "X-RAG-Stats",
+    `enabled=${isRagEnabled()} k=${buildRagConfig().k} hits=${ragHits.length} latency_ms=${ragLatencyMs}`,
+  );
+
+  return response;
 }

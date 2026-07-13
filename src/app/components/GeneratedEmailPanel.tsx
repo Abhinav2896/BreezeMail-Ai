@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
-import { Mail, RefreshCcw, Copy, Check, Sparkles, Loader2, AlertCircle } from "lucide-react";
+import { Mail, RefreshCcw, Copy, Check, Sparkles, Loader2, AlertCircle, BookOpen } from "lucide-react";
 import { Badge } from "@/app/components/ui/badge";
 import { EmailContent, emailToPlainText } from "@/app/types";
 
@@ -124,6 +124,30 @@ export function GeneratedEmailPanel({ email, isLoading, error, onRegenerate }: G
               )}
               <p className="whitespace-pre-line">{email.signOff}</p>
             </div>
+
+            {/* RAG source attribution chips */}
+            {email.sources && email.sources.length > 0 && (
+              <div className="mt-6 pt-4 border-t border-white/30 shrink-0">
+                <div className="flex items-center gap-1.5 mb-2.5">
+                  <BookOpen className="w-3.5 h-3.5 text-mint-600 dark:text-mint-400" />
+                  <span className="font-jakarta font-semibold text-[11px] text-ink-500 dark:text-gray-400 uppercase tracking-wider">
+                    Grounded by
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {email.sources.map((source) => (
+                    <span
+                      key={source.id}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-mint-50/60 dark:bg-mint-900/30 border border-mint-200/50 dark:border-mint-700/40 text-[11px] font-inter font-medium text-mint-800 dark:text-mint-300 backdrop-blur-sm"
+                      title={`Source: ${source.id}`}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-mint-500 dark:bg-mint-400 shrink-0" />
+                      {source.title}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </>
       ) : (

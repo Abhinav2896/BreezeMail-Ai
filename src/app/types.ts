@@ -11,6 +11,8 @@ export interface EmailContent {
   paragraphs: string[];
   bullets: string[];
   signOff: string;
+  /** RAG source references — present when RAG retrieval found relevant chunks */
+  sources?: { id: string; title: string }[];
 }
 
 /**
