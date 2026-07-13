@@ -93,10 +93,10 @@ async function main() {
   }
 
   console.log(`[build-index] Embedding ${allChunks.length} chunks with GoogleGenAIEmbeddings...`);
-  
+
   const embeddings = new GoogleGenerativeAIEmbeddings({
     apiKey: process.env.GEMINI_API_KEY,
-    modelName: "gemini-embedding-001", // Default Gemini embedding model
+    modelName: "text-embedding-004", // Default Gemini embedding model
   });
 
   const texts = allChunks.map((c) => c.text);
@@ -108,7 +108,7 @@ async function main() {
   }
 
   const dim = vectors[0].length;
-  const modelName = "google-genai/gemini-embedding-001";
+  const modelName = "google-genai/text-embedding-004";
 
   const index: RagIndex = {
     model: modelName,
@@ -174,7 +174,7 @@ async function loadEnv() {
           process.env[key] = value;
         }
       }
-    } catch {}
+    } catch { }
   }
 }
 
