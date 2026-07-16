@@ -147,8 +147,29 @@ function isRagEnabled(): boolean {
 // Route Handler — POST /api/generate
 // ---------------------------------------------------------------------------
 
-const GEMINI_ENDPOINT =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+const GEMINI_BASE =
+  "https://generativelanguage.googleapis.com/v1beta/models";
+
+/**
+ * Model fallback chain, ordered by free-tier rate-limit generosity.
+ *
+ * From the Google AI Studio rate-limit dashboard (free tier):
+ *   gemini-2.0-flash-lite  → 30 RPM, 1500 RPD
+ *   gemini-2.5-flash-lite  → 10 RPM,   20 RPD
+ *   gemini-2.0-flash       →  5 RPM,   20 RPD  (or similar)
+ *
+ * When a model returns 429, the system moves to the next model in the
+ * chain instead of retrying the same rate-limited one.
+ */
+const MODEL_CHAIN = [
+  "gemini-2.0-flash-lite",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+];
+
+function geminiEndpoint(model: string): string {
+  return `${GEMINI_BASE}/${model}:generateContent`;
+}
 
 /**
  * Per-attempt timeout. Kept under Vercel's 60s serverless function limit
@@ -156,41 +177,49 @@ const GEMINI_ENDPOINT =
  */
 const TIMEOUT_MS = 55_000;
 
-/** Maximum retry attempts for transient Gemini API failures. */
-const MAX_RETRIES = 3;
+/** Maximum retry attempts per model before moving to the next fallback. */
+const MAX_RETRIES_PER_MODEL = 2;
 
 /** Base delay (ms) for exponential backoff between retries. */
 const BASE_DELAY_MS = 1_000;
 
 /**
- * HTTP status codes from Gemini that are safe to retry
- * (transient / rate-limit / server-side hiccups).
+ * HTTP status codes from Gemini that are safe to retry on the SAME model
+ * (transient server-side hiccups — NOT rate limits).
  */
-const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503]);
+const RETRYABLE_SAME_MODEL = new Set([500, 502, 503]);
 
 // ---------------------------------------------------------------------------
-// Retry helper
+// Gemini call helper
 // ---------------------------------------------------------------------------
 
 /**
  * A structured result from a single Gemini call attempt.
  * On success, `email` is populated. On failure, `error` + `status` describe
- * what went wrong and `retryable` indicates if the caller should retry.
+ * what went wrong. `geminiStatus` carries the raw HTTP status from Google
+ * so the retry loop can distinguish rate-limits (429) from server errors.
  */
 type GeminiAttemptResult =
-  | { ok: true; email: EmailContent }
-  | { ok: false; error: string; status: number; retryable: boolean };
+  | { ok: true; email: EmailContent; model: string }
+  | {
+      ok: false;
+      error: string;
+      status: number;
+      geminiStatus?: number;
+      retryable: boolean;
+    };
 
 async function callGemini(
   prompt: string,
   apiKey: string,
+  model: string,
 ): Promise<GeminiAttemptResult> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   let geminiResponse: Response;
   try {
-    geminiResponse = await fetch(GEMINI_ENDPOINT, {
+    geminiResponse = await fetch(geminiEndpoint(model), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -224,12 +253,12 @@ async function callGemini(
   // Handle non-OK Gemini responses
   if (!geminiResponse.ok) {
     const statusText = geminiResponse.statusText || "Unknown error";
-    const retryable = RETRYABLE_STATUS_CODES.has(geminiResponse.status);
     return {
       ok: false,
       error: `AI model returned an error: ${geminiResponse.status} ${statusText}`,
       status: 502,
-      retryable,
+      geminiStatus: geminiResponse.status,
+      retryable: true,
     };
   }
 
@@ -303,7 +332,7 @@ async function callGemini(
     };
   }
 
-  return { ok: true, email };
+  return { ok: true, email, model };
 }
 
 /** Sleep helper for backoff delays. */
@@ -387,29 +416,73 @@ export async function POST(request: NextRequest) {
   const contextBlock = buildContextBlock(ragHits);
   const prompt = basePrompt + contextBlock;
 
-  // 5. Call Gemini with automatic retry on transient failures
+  // 5. Call Gemini with model fallback chain + per-model retries
+  //
+  //    Strategy:
+  //    - Try each model in MODEL_CHAIN sequentially.
+  //    - For each model, retry up to MAX_RETRIES_PER_MODEL times on
+  //      transient server errors (500/502/503).
+  //    - If a model returns 429 (rate limit), immediately move to the
+  //      next model in the chain — retrying the same model won't help.
+  //    - If ALL models are exhausted, return the last error.
+
   let lastResult: GeminiAttemptResult | null = null;
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    lastResult = await callGemini(prompt, apiKey);
+  for (const model of MODEL_CHAIN) {
+    let rateLimited = false;
 
-    if (lastResult.ok) break;
+    for (let attempt = 1; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
+      lastResult = await callGemini(prompt, apiKey, model);
 
-    // Log the failure for observability
-    console.warn(
-      `[gemini] Attempt ${attempt}/${MAX_RETRIES} failed: ${lastResult.error}`,
-    );
+      if (lastResult.ok) {
+        console.log(`[gemini] Success with model: ${model}`);
+        break;
+      }
 
-    // Don't retry if the error is non-transient or this was the last attempt
-    if (!lastResult.retryable || attempt === MAX_RETRIES) break;
+      // Log the failure for observability
+      console.warn(
+        `[gemini] ${model} attempt ${attempt}/${MAX_RETRIES_PER_MODEL} failed: ${lastResult.error}`,
+      );
 
-    // Exponential backoff: 1s, 2s, 4s...
-    const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-    console.log(`[gemini] Retrying in ${delay}ms...`);
-    await sleep(delay);
+      // 429 = rate limited → skip to the next model immediately
+      if (!lastResult.ok && lastResult.geminiStatus === 429) {
+        console.warn(
+          `[gemini] ${model} is rate-limited (429), falling back to next model...`,
+        );
+        rateLimited = true;
+        break;
+      }
+
+      // Non-retryable error → stop entirely
+      if (!lastResult.retryable) break;
+
+      // Only retry on transient server errors for the same model
+      if (
+        lastResult.geminiStatus &&
+        !RETRYABLE_SAME_MODEL.has(lastResult.geminiStatus)
+      ) {
+        break;
+      }
+
+      // Don't sleep after the last attempt
+      if (attempt < MAX_RETRIES_PER_MODEL) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        console.log(`[gemini] Retrying ${model} in ${delay}ms...`);
+        await sleep(delay);
+      }
+    }
+
+    // If we got a success, break out of the model chain loop
+    if (lastResult?.ok) break;
+
+    // If this model was rate-limited, continue to next model without delay
+    if (rateLimited) continue;
+
+    // If this model had a non-retryable error, stop trying other models
+    if (lastResult && !lastResult.ok && !lastResult.retryable) break;
   }
 
-  // 6. If all attempts failed, return the last error
+  // 6. If all models/attempts failed, return the last error
   if (!lastResult || !lastResult.ok) {
     const errResult = lastResult as Exclude<
       GeminiAttemptResult,
@@ -432,11 +505,12 @@ export async function POST(request: NextRequest) {
   const responseBody = { email };
   const response = NextResponse.json(responseBody);
 
-  // Add RAG observability header
+  // Add RAG observability header (includes which model succeeded)
   response.headers.set(
     "X-RAG-Stats",
-    `enabled=${isRagEnabled()} k=${buildRagConfig().k} hits=${ragHits.length} latency_ms=${ragLatencyMs}`,
+    `enabled=${isRagEnabled()} k=${buildRagConfig().k} hits=${ragHits.length} latency_ms=${ragLatencyMs} model=${lastResult.model}`,
   );
 
   return response;
 }
+
