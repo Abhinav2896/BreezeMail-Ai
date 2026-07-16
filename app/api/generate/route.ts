@@ -148,9 +148,172 @@ function isRagEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 const GEMINI_ENDPOINT =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
-const TIMEOUT_MS = 120_000;
+/**
+ * Per-attempt timeout. Kept under Vercel's 60s serverless function limit
+ * to avoid platform-level kills that return opaque 502/504 errors.
+ */
+const TIMEOUT_MS = 55_000;
+
+/** Maximum retry attempts for transient Gemini API failures. */
+const MAX_RETRIES = 3;
+
+/** Base delay (ms) for exponential backoff between retries. */
+const BASE_DELAY_MS = 1_000;
+
+/**
+ * HTTP status codes from Gemini that are safe to retry
+ * (transient / rate-limit / server-side hiccups).
+ */
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503]);
+
+// ---------------------------------------------------------------------------
+// Retry helper
+// ---------------------------------------------------------------------------
+
+/**
+ * A structured result from a single Gemini call attempt.
+ * On success, `email` is populated. On failure, `error` + `status` describe
+ * what went wrong and `retryable` indicates if the caller should retry.
+ */
+type GeminiAttemptResult =
+  | { ok: true; email: EmailContent }
+  | { ok: false; error: string; status: number; retryable: boolean };
+
+async function callGemini(
+  prompt: string,
+  apiKey: string,
+): Promise<GeminiAttemptResult> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  let geminiResponse: Response;
+  try {
+    geminiResponse = await fetch(GEMINI_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+      }),
+      signal: controller.signal,
+    });
+  } catch (err: unknown) {
+    clearTimeout(timeoutId);
+    if (err instanceof DOMException && err.name === "AbortError") {
+      return {
+        ok: false,
+        error: "The AI model took too long to respond. Please try again.",
+        status: 504,
+        retryable: true,
+      };
+    }
+    return {
+      ok: false,
+      error: "Failed to reach the AI model. Please try again later.",
+      status: 502,
+      retryable: true,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  // Handle non-OK Gemini responses
+  if (!geminiResponse.ok) {
+    const statusText = geminiResponse.statusText || "Unknown error";
+    const retryable = RETRYABLE_STATUS_CODES.has(geminiResponse.status);
+    return {
+      ok: false,
+      error: `AI model returned an error: ${geminiResponse.status} ${statusText}`,
+      status: 502,
+      retryable,
+    };
+  }
+
+  // Parse Gemini response
+  let geminiBody: unknown;
+  try {
+    geminiBody = await geminiResponse.json();
+  } catch {
+    return {
+      ok: false,
+      error: "Failed to parse AI model response.",
+      status: 502,
+      retryable: true,
+    };
+  }
+
+  // Extract the text content from Gemini's response structure
+  const candidates = (geminiBody as Record<string, unknown>)?.candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return {
+      ok: false,
+      error: "AI model returned an empty response. Please try again.",
+      status: 502,
+      retryable: true,
+    };
+  }
+
+  const firstCandidate = candidates[0] as Record<string, unknown>;
+  const content = firstCandidate?.content as
+    | Record<string, unknown>
+    | undefined;
+  const parts = content?.parts as
+    | Array<Record<string, unknown>>
+    | undefined;
+  const rawText = parts?.[0]?.text;
+
+  if (typeof rawText !== "string" || rawText.trim().length === 0) {
+    return {
+      ok: false,
+      error: "AI model returned an empty text response. Please try again.",
+      status: 502,
+      retryable: true,
+    };
+  }
+
+  // Parse and validate the JSON email content
+  const cleaned = stripCodeFences(rawText);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return {
+      ok: false,
+      error: "AI model response was not valid JSON. Please try again.",
+      status: 502,
+      retryable: true,
+    };
+  }
+
+  let email: EmailContent;
+  try {
+    email = validateEmailContent(parsed);
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Unknown validation error";
+    return {
+      ok: false,
+      error: `AI model response failed validation: ${message}. Please try again.`,
+      status: 502,
+      retryable: true,
+    };
+  }
+
+  return { ok: true, email };
+}
+
+/** Sleep helper for backoff delays. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/generate
+// ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest) {
   // 1. Parse and validate request body (check user input before server config)
@@ -164,9 +327,16 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!body.description || typeof body.description !== "string" || body.description.trim().length === 0) {
+  if (
+    !body.description ||
+    typeof body.description !== "string" ||
+    body.description.trim().length === 0
+  ) {
     return NextResponse.json(
-      { error: "The 'description' field is required and must be a non-empty string." },
+      {
+        error:
+          "The 'description' field is required and must be a non-empty string.",
+      },
       { status: 400 },
     );
   }
@@ -217,112 +387,48 @@ export async function POST(request: NextRequest) {
   const contextBlock = buildContextBlock(ragHits);
   const prompt = basePrompt + contextBlock;
 
-  // 5. Call Gemini with timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  // 5. Call Gemini with automatic retry on transient failures
+  let lastResult: GeminiAttemptResult | null = null;
 
-  let geminiResponse: Response;
-  try {
-    geminiResponse = await fetch(GEMINI_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        contents: [
-          { parts: [{ text: prompt }] },
-        ],
-      }),
-      signal: controller.signal,
-    });
-  } catch (err: unknown) {
-    clearTimeout(timeoutId);
-    if (err instanceof DOMException && err.name === "AbortError") {
-      return NextResponse.json(
-        { error: "The AI model took too long to respond. Please try again." },
-        { status: 504 },
-      );
-    }
-    return NextResponse.json(
-      { error: "Failed to reach the AI model. Please try again later." },
-      { status: 502 },
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    lastResult = await callGemini(prompt, apiKey);
+
+    if (lastResult.ok) break;
+
+    // Log the failure for observability
+    console.warn(
+      `[gemini] Attempt ${attempt}/${MAX_RETRIES} failed: ${lastResult.error}`,
     );
-  } finally {
-    clearTimeout(timeoutId);
+
+    // Don't retry if the error is non-transient or this was the last attempt
+    if (!lastResult.retryable || attempt === MAX_RETRIES) break;
+
+    // Exponential backoff: 1s, 2s, 4s...
+    const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+    console.log(`[gemini] Retrying in ${delay}ms...`);
+    await sleep(delay);
   }
 
-  // 6. Handle non-OK Gemini responses
-  if (!geminiResponse.ok) {
-    const statusText = geminiResponse.statusText || "Unknown error";
+  // 6. If all attempts failed, return the last error
+  if (!lastResult || !lastResult.ok) {
+    const errResult = lastResult as Exclude<
+      GeminiAttemptResult,
+      { ok: true }
+    >;
     return NextResponse.json(
-      { error: `AI model returned an error: ${geminiResponse.status} ${statusText}` },
-      { status: 502 },
+      { error: errResult?.error ?? "Unknown error from AI model." },
+      { status: errResult?.status ?? 502 },
     );
   }
 
-  // 7. Parse Gemini response
-  let geminiBody: unknown;
-  try {
-    geminiBody = await geminiResponse.json();
-  } catch {
-    return NextResponse.json(
-      { error: "Failed to parse AI model response." },
-      { status: 502 },
-    );
-  }
-
-  // Extract the text content from Gemini's response structure
-  const candidates = (geminiBody as Record<string, unknown>)?.candidates;
-  if (!Array.isArray(candidates) || candidates.length === 0) {
-    return NextResponse.json(
-      { error: "AI model returned an empty response. Please try again." },
-      { status: 502 },
-    );
-  }
-
-  const firstCandidate = candidates[0] as Record<string, unknown>;
-  const content = firstCandidate?.content as Record<string, unknown> | undefined;
-  const parts = content?.parts as Array<Record<string, unknown>> | undefined;
-  const rawText = parts?.[0]?.text;
-
-  if (typeof rawText !== "string" || rawText.trim().length === 0) {
-    return NextResponse.json(
-      { error: "AI model returned an empty text response. Please try again." },
-      { status: 502 },
-    );
-  }
-
-  // 8. Parse and validate the JSON email content
-  const cleaned = stripCodeFences(rawText);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    return NextResponse.json(
-      { error: "AI model response was not valid JSON. Please try again." },
-      { status: 502 },
-    );
-  }
-
-  let email: EmailContent;
-  try {
-    email = validateEmailContent(parsed);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown validation error";
-    return NextResponse.json(
-      { error: `AI model response failed validation: ${message}. Please try again.` },
-      { status: 502 },
-    );
-  }
-
-  // 9. Attach RAG source references to the email
+  // 7. Success — attach RAG source references to the email
+  const email = lastResult.email;
   const sources = ragHits.map(toSourceRef);
   if (sources.length > 0) {
     email.sources = sources;
   }
 
-  // 10. Build response with RAG stats header
+  // 8. Build response with RAG stats header
   const responseBody = { email };
   const response = NextResponse.json(responseBody);
 
