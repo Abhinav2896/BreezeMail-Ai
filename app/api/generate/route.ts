@@ -154,17 +154,19 @@ const GEMINI_BASE =
  * Model fallback chain, ordered by free-tier rate-limit generosity.
  *
  * From the Google AI Studio rate-limit dashboard (free tier):
- *   gemini-2.0-flash-lite  → 30 RPM, 1500 RPD
- *   gemini-2.5-flash-lite  → 10 RPM,   20 RPD
- *   gemini-2.0-flash       →  5 RPM,   20 RPD  (or similar)
+ *   gemini-3.1-flash-lite   → 15 RPM, 500 RPD  (most generous!)
+ *   gemini-2.5-flash-lite   → 10 RPM,  20 RPD
+ *   gemini-2.0-flash-lite   → 30 RPM, 1500 RPD
+ *   gemini-2.5-flash        →  5 RPM,  20 RPD
  *
  * When a model returns 429, the system moves to the next model in the
  * chain instead of retrying the same rate-limited one.
  */
 const MODEL_CHAIN = [
+  "gemini-3.1-flash-lite",
   "gemini-2.0-flash-lite",
   "gemini-2.5-flash-lite",
-  "gemini-2.0-flash",
+  "gemini-2.5-flash",
 ];
 
 function geminiEndpoint(model: string): string {
